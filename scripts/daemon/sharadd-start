@@ -4,6 +4,7 @@
 . sharad-usage
 sharadd-start() {
 
+    echo $(pwd)
     potential_exe=$(stat -c "%n" * | grep sharad-backend)
     
     if [[ -z $potential_exe ]]; then
@@ -20,6 +21,6 @@ sharadd-start() {
     echo "Found $potential_exe as candidate to be started"
     sharad_daemon_dir="$HOME/.local/share/sharad"
     mkdir -p "$sharad_daemon_dir"
-    "./$potential_exe" > ./sharad-backend.log &
+    "./$potential_exe" > .sharad/.sharad-backend.log &
     echo "$!" > "$sharad_daemon_dir/latest.pid"
 }
