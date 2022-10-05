@@ -1,7 +1,7 @@
 cabal-version: 2.4
 
-name:           sharad-backend
-version:        0.2.0.0
+name:           foucl
+version:        0.1.0.0
 description:
 homepage:
 bug-reports:
@@ -13,22 +13,22 @@ build-type:     Simple
 
 source-repository head
   type: git
-  location: https://github.com/githubuser/sharad-back-haskell
+  location: https://github.com/amaille91/foucl
 
 library
   exposed-modules:
       Lib
+      , Model
       , CrudStorage
       , Crud
       , NoteCrud
       , ChecklistCrud
   other-modules:
-      Paths_sharad_backend
+      Paths_foucl
   hs-source-dirs:
       src
   build-depends:
       base >=4.7 && <5
-    , sharad-common
     , happstack-server
     , bytestring
     , aeson
@@ -38,54 +38,55 @@ library
     , transformers
     , transformers-either
     , mtl
+    , base64-bytestring
+    , SHA
   default-language: Haskell2010
 
-executable sharad-backend
+executable foucl
   main-is: Main.hs
   other-modules:
-      Paths_sharad_backend
+      Paths_foucl
   hs-source-dirs:
       app
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -Wall
   build-depends:
       base >=4.7 && <5
-    , sharad-backend
+    , foucl
   default-language: Haskell2010
 
-test-suite sharad-unit-tests
+test-suite foucl-unit-tests
   type: exitcode-stdio-1.0
   main-is: UnitTestsExec.hs
   other-modules:
-        Paths_sharad_backend
+        Paths_foucl
       , UnitTests
   hs-source-dirs:
       test/unit-tests
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
-    , sharad-backend
-    , sharad-common
+    , foucl
     , HUnit ==1.6.0.0
     , directory
     , transformers
   default-language: Haskell2010
 
-test-suite sharad-integration-tests
+test-suite foucl-integration-tests
   type: exitcode-stdio-1.0
   main-is: IntegrationTestsExec.hs
   other-modules:
-      Paths_sharad_backend
+      Paths_foucl
     , IntegrationTests
   hs-source-dirs:
     test/integration-tests
   ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
+    , foucl
     , hspec
     , HUnit
     , http-conduit
     , aeson
     , bytestring
     , utf8-string
-    , sharad-common
   default-language: Haskell2010

@@ -1,33 +1,33 @@
 #!/bin/bash
-# sharadd.sh
+# foucld.sh
 
-# This script is meant to be a wrapper around the sharad web application.
+# This script is meant to be a wrapper around the foucl web application.
 # Its role is to control the starting and stopping of the application, passing options to the server
 
-. sharadd-usage
-. sharadd-start
-. sharadd-stop
+. foucld-usage
+. foucld-start
+. foucld-stop
 
 case $1 in
 
         start)
                 shift
-                sharadd-start
+                foucld-start
                 ;;
 
         stop)
                 shift
-                sharadd-stop
+                foucld-stop
                 ;;
                 
         restart)
                 shift
-                sharadd-stop
-                sharadd-start
+                foucld-stop
+                foucld-start
                 ;;
         *)
                 echo "Unknown command $1" >&2
-                sharadd-usage >&2
+                foucld-usage >&2
                 exit 1
                 ;;
 esac

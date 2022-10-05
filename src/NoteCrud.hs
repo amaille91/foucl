@@ -18,4 +18,4 @@ instance CRUDEngine NoteServiceConfig NoteContent where
   putItem = CrudStorage.modifyItem
   crudTypeDenomination _ = "note"
 
-defaultNoteServiceConfig = NoteServiceConfig ".sharad/data/note"
+defaultNoteServiceConfig = NoteServiceConfig ".foucl/data/note"

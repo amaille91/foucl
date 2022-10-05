@@ -18,4 +18,4 @@ instance CRUDEngine ChecklistServiceConfig ChecklistContent where
   putItem = CrudStorage.modifyItem
   crudTypeDenomination _ = "checklist"
 
-defaultChecklistServiceConfig = ChecklistServiceConfig ".sharad/data/checklist"
+defaultChecklistServiceConfig = ChecklistServiceConfig ".foucl/data/checklist"

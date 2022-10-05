@@ -1,0 +1,27 @@
+#!/bin/bash
+# foucld-start.sh
+
+foucld-start() {
+
+    echo $(pwd)
+    potential_exe=$(stat -c "%n" * | grep foucl)
+    
+    if [[ -z $potential_exe ]]; then
+            echo "Unable to find a file corresponding to the foucl server executable. This script must be run in a folder containing an executable named foucl*" >&2
+            exit 1
+    fi
+    
+    if [[ $(echo $potential_exe | wc -w) != 1  ]]; then
+            echo -e "Could not determine which foucl server executable to run. Found:\n" >&2
+            echo "$potential_exe" >&2
+            exit 1
+    fi
+    
+    echo "Found $potential_exe as candidate to be started"
+    foucl_daemon_dir="$HOME/.local/share/foucl"
+    mkdir -p "$foucl_daemon_dir"
+    foucl_private_dir="./.foucl"
+    mkdir -p "$foucl_private_dir"
+    "./$potential_exe" > "$foucl_private_dir/.foucl.log" &
+    echo "$!" > "$foucl_daemon_dir/latest.pid"
+}

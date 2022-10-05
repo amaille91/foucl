@@ -1,0 +1,46 @@
+#!/bin/bash
+# foucl-proj.sh
+
+set -euo pipefail
+shopt -s inherit_errexit
+
+case $1 in
+        build)
+                sbt build foucl
+                ;;
+        test)
+                sbt test foucl
+                ;;
+        integration-test)
+                project_dir=$(pwd)
+                built_exe=$(sbt build foucl | tail -n1)
+                srt publish foucl --input "$built_exe"
+                sandbox_dir="./dist-newstyle/sandbox"
+                rm -rf "$sandbox_dir"
+                mkdir -p "$sandbox_dir/.$built_exe/data/note"
+                mkdir -p "$sandbox_dir/.$built_exe/data/checklist"
+                srt install foucl --to "$sandbox_dir"
+                cd "$sandbox_dir"
+                foucld start
+                cd "$project_dir"
+                echo "Going to integration test"
+                sbt integration-test foucl
+                foucld stop
+                # here, with the options set, when the integration test fails, the server doesn't stop. Needs a try-catch or perhaps
+                # a task in the backgroud management so that when the integration tests are over, we can stop the server
+                ;;
+          *)
+                usage
+esac
+
+usage() {
+cat <<<EOF
+USAGE: foucl-proj [COMMAND]
+
+Available COMMANDs are:
+
+build:            builds the project in the current directory
+test:             runs the tests of the project
+integration-test: runs the integration tests of the project
+EOF
+}

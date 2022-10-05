@@ -1,4 +1,4 @@
 #!/bin/bash
 # install.sh
 
-cp ./sharad /usr/local/bin/ 
+cp ./foucl-proj /usr/local/bin/ 

@@ -1,0 +1,17 @@
+#!/bin/bash
+# foucld-usage.sh
+
+foucld-usage() {
+    cat <<EOF
+USAGE: foucl [COMMAND] [OPTIONS]
+
+Wrapper around the foucl web application. Its role is to control the starting and stopping of the application, passing options to the server
+
+Options:
+  -h    Displays this usage
+
+Commands:
+  start    Starts the foucl server
+EOF
+}
+

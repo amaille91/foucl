@@ -1,1 +1,1 @@
-packages: sharad-backend.cabal, ../sharad-common/sharad-common.cabal
+packages: foucl.cabal

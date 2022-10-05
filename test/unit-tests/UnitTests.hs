@@ -134,10 +134,10 @@ retrieveContentInDir config = do
     where dirPath = getStorageDirectoryPath config
 
 checklistServiceConfig :: ChecklistServiceConfig
-checklistServiceConfig = ChecklistServiceConfig "target/.sharad/data/checklist/"
+checklistServiceConfig = ChecklistServiceConfig "target/.foucl/data/checklist/"
 
 noteServiceConfig :: NoteServiceConfig
-noteServiceConfig = NoteServiceConfig "target/.sharad/data/note/"
+noteServiceConfig = NoteServiceConfig "target/.foucl/data/note/"
 
 withEmptyDir :: CRUDEngine crudConfig a => crudConfig -> (crudConfig -> IO ()) -> IO ()
 withEmptyDir config _test = do
@@ -151,7 +151,7 @@ withEmptyDir config _test = do
     where dirPath = getStorageDirectoryPath config
 
 getStorageDirectoryPath :: CRUDEngine crudConfig a => crudConfig -> String
-getStorageDirectoryPath config = "target/.sharad/data/" ++ crudTypeDenomination config ++ "/"
+getStorageDirectoryPath config = "target/.foucl/data/" ++ crudTypeDenomination config ++ "/"
 
 class CRUDEngine crudType a => ContentGen crudType a where
     generateExample :: crudType -> Int -> a

@@ -1,4 +1,4 @@
 #!/bin/bash
 # install.sh
 
-cp ./sharadd* /usr/local/bin/ 
+cp ./foucld* /usr/local/bin/ 

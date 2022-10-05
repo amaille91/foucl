@@ -1,0 +1,11 @@
+#!/bin/bash
+# foucld-stop.sh
+
+foucld-stop() {
+
+    foucl_daemon_dir="$HOME/.local/share/foucl"
+    foucl_server_pidfile="$foucl_daemon_dir/latest.pid"
+    pid=$(cat $foucl_server_pidfile)
+    echo "Killing process $pid"
+    kill -9 $pid
+}
