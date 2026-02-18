@@ -20,9 +20,12 @@ library
       Lib
       , Model
       , CrudStorage
+      , Logging
       , Crud
       , NoteCrud
       , ChecklistCrud
+      , AgendaCrud
+      , TaskCrud
       , Auth
       , Session
   other-modules:

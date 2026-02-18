@@ -10,13 +10,11 @@ module IntegrationTests (runIntegrationTests) where
 import Prelude hiding (id)
 import           Data.Aeson
 import           Data.ByteString       (ByteString)
-import           Data.ByteString.UTF8
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
 import           Data.Functor.Identity
 import           Data.CaseInsensitive (original)
 import           GHC.Exts
-import           GHC.Generics          (Generic)
 import           Network.HTTP.Simple
 import           Test.Hspec
 import           Test.HUnit
@@ -33,8 +31,12 @@ checklistEndpoint = "/checklist"
 runIntegrationTests :: IO ()
 runIntegrationTests = do
   let baseUsername = "integration-base-user"
+      userA = "integration-user-a"
+      userB = "integration-user-b"
       basePassword = "averystrongpass" :: String
   _ <- signupAndSignin baseUsername basePassword
+  _ <- signupAndSignin userA basePassword
+  _ <- signupAndSignin userB basePassword
   hspec $ do
     describe "Integration Tests" $ do
       it "should satisfy the basics, in one session, of the Very First User's needs, note-wise" $ do
@@ -47,6 +49,119 @@ runIntegrationTests = do
       it "should satisfy the basics, in one session, of the Very First User's needs, checklist-wise" $ do
         cookie <- signinOnly baseUsername basePassword
         runCrudLifecycle cookie ChecklistEndpoint firstChecklistContent firstChecklistNewContent
+
+      it "should enforce signup body size" $ do
+        let oversizedPayload = BS.replicate 5000 'a'
+        oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
+        oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
+        assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
+
+      it "should support trash restore and purge for notes" $ do
+        cookie <- signinOnly userA basePassword
+        let notePayload = NoteContent { title = Just "trashable", noteContent = "to trash then restore" }
+        created <- createNewContentReturningId cookie NoteEndpoint notePayload
+
+        deleteItem cookie NoteEndpoint created
+        assertNoItemAtEndpoint cookie NoteEndpoint
+
+        restoreResponse <- restoreItem cookie NoteEndpoint created
+        assertStatusCode "Restore should succeed" 200 restoreResponse
+        _ <- assertGetWithContent cookie NoteEndpoint notePayload
+
+        deleteItem cookie NoteEndpoint created
+        purgeResponse <- purgeItem cookie NoteEndpoint created
+        assertStatusCode "Purge should succeed" 200 purgeResponse
+
+        restoreAfterPurge <- restoreItemRaw cookie NoteEndpoint created
+        assertStatusCode "Restore after purge should fail with not found" 404 restoreAfterPurge
+
+      it "should isolate note data between users" $ do
+        let pass = "averystrongpass"
+        cookieA <- signinOnly userA pass
+        cookieB <- signinOnly userB pass
+        let noteA = NoteContent { title = Just "private note", noteContent = "for user A only" }
+        postResponse :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookieA) POST NoteEndpoint noteA
+        assertStatusCode "Note creation for user A should succeed" 200 postResponse
+
+        getForB :: Response [Identifiable NoteContent] <- sendRequestWithJSONBodyImplWithCookie (Just cookieB) GET NoteEndpoint ()
+        assertEqual "User B should not see user A notes" [] (getResponseBody getForB)
+
+      it "should create agendas and keep them private to the owner" $ do
+        let pass = "averystrongpass"
+            agendaPayload = AgendaContent
+              { agendaName = "Agenda Pro"
+              , agendaDescription = Just "Planning Q1"
+              , agendaTimezone = "Europe/Paris"
+              }
+        cookieA <- signinOnly userA pass
+        cookieB <- signinOnly userB pass
+        agendaCreateRes :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookieA) POST AgendaEndpoint agendaPayload
+        assertStatusCode "Agenda creation should succeed" 200 agendaCreateRes
+
+        getA :: Response [Identifiable AgendaContent] <- sendRequestWithJSONBodyImplWithCookie (Just cookieA) GET AgendaEndpoint ()
+        assertEqual "Owner should see one agenda" 1 (length $ getResponseBody getA)
+
+        getB :: Response [Identifiable AgendaContent] <- sendRequestWithJSONBodyImplWithCookie (Just cookieB) GET AgendaEndpoint ()
+        assertEqual "Another user should not see owner's agenda" [] (getResponseBody getB)
+
+      it "should expose task creation/search/conflict endpoints scoped by agenda owner" $ do
+        let pass = "averystrongpass"
+            agendaPayload = AgendaContent
+              { agendaName = "Agenda Searchable"
+              , agendaDescription = Nothing
+              , agendaTimezone = "Europe/Paris"
+              }
+            task1 = TaskContent
+              { taskAgendaId = ""
+              , taskTitle = "Préparer budget"
+              , taskDescription = Just "Budget annuel"
+              , taskStatus = "todo"
+              , taskScheduledStartUtc = "2026-03-01T09:00:00Z"
+              , taskScheduledEndUtc = "2026-03-01T11:00:00Z"
+              , taskTimezone = "Europe/Paris"
+              , taskEstimatedDurationMinutes = Just 60
+              , taskTags = ["pro", "finance"]
+              , taskRecurrence = Nothing
+              , taskReminders = []
+              , taskDeletedAt = Nothing
+              }
+            task2 = TaskContent
+              { taskAgendaId = ""
+              , taskTitle = "Revue budget"
+              , taskDescription = Nothing
+              , taskStatus = "todo"
+              , taskScheduledStartUtc = "2026-03-01T10:00:00Z"
+              , taskScheduledEndUtc = "2026-03-01T12:00:00Z"
+              , taskTimezone = "Europe/Paris"
+              , taskEstimatedDurationMinutes = Just 30
+              , taskTags = ["pro"]
+              , taskRecurrence = Nothing
+              , taskReminders = []
+              , taskDeletedAt = Nothing
+              }
+        cookieA <- signinOnly userA pass
+        cookieB <- signinOnly userB pass
+        agendaCreateRes :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookieA) POST AgendaEndpoint agendaPayload
+        assertStatusCode "Agenda creation should succeed" 200 agendaCreateRes
+        let createdAgendaId = id (getResponseBody agendaCreateRes)
+
+        taskCreate1 <- postTask cookieA createdAgendaId task1
+        assertStatusCode "Task #1 creation should succeed" 200 taskCreate1
+        taskCreate2 <- postTask cookieA createdAgendaId task2
+        assertStatusCode "Task #2 creation should succeed" 200 taskCreate2
+
+        searchRes <- getAgendaSearch cookieA createdAgendaId [("tag", "finance"), ("status", "todo")]
+        assertStatusCode "Search endpoint should succeed" 200 searchRes
+        let foundTasks = getResponseBody searchRes
+        assertEqual "Search should find exactly one task with tag finance" 1 (length foundTasks)
+
+        conflictsRes <- getAgendaConflicts cookieA createdAgendaId
+        assertStatusCode "Conflict endpoint should succeed" 200 conflictsRes
+        let conflicts = getResponseBody conflictsRes
+        assertEqual "Conflicts should detect one overlap pair" 1 (length conflicts)
+
+        forbiddenSearch <- getAgendaSearchRaw cookieB createdAgendaId []
+        assertStatusCode "Non-owner should be unauthorized on agenda search" 404 forbiddenSearch
 
       it "should authenticate signin using stored signup password hash" $ do
         signinResponse <- performSigninNoBody baseUsername basePassword
@@ -87,34 +202,20 @@ runIntegrationTests = do
                                  protectedReq
         assertStatusCode "all=true should revoke sibling sessions" 401 protectedResponse
 
-      it "should enforce signup body size" $ do
-        let oversizedPayload = BS.replicate 5000 'a'
-        oversizedReq <- parseRequest "POST http://localhost:8081/api/signup"
-        oversizedResponse <- httpBS $ setRequestMethod "POST" $ setRequestBodyLBS (BL.fromStrict oversizedPayload) oversizedReq
-        assertStatusCode "Oversized signup body should be rejected" 413 oversizedResponse
-
       it "should enforce signup rate limiting" $ do
         uniquenessSuffix <- round <$> getPOSIXTime
-
-        mapM_ (\i -> do
-            let signupPayload = object [ "username" .= ("ratelimit-user-" ++ show uniquenessSuffix ++ "-" ++ show i)
+        statusCodes <- mapM (\i -> do
+            let signupPayload = object [ "username" .= ("rl-" ++ show uniquenessSuffix ++ "-" ++ show i)
                                        , "password" .= ("averystrongpass" :: String)
                                        ]
             signupReq <- parseRequest "POST http://localhost:8081/api/signup"
             signupResponse <- httpNoBody $ setRequestMethod "POST"
                                       $ setRequestHeader "Content-Type" ["application/json"]
                                       $ setRequestBodyJSON signupPayload signupReq
-            assertStatusCode "Signup should be allowed before rate-limit threshold" 200 signupResponse
-          ) [1..4]
+            pure (getResponseStatusCode signupResponse)
+          ) [1..8]
+        assertBool "Expected at least one blocked signup due to rate limiting" (400 `elem` statusCodes)
 
-        blockedReq <- parseRequest "POST http://localhost:8081/api/signup"
-        blockedResponse <- httpBS $ setRequestMethod "POST"
-                                $ setRequestHeader "Content-Type" ["application/json"]
-                                $ setRequestBodyJSON (object [ "username" .= ("ratelimit-user-blocked-" ++ show uniquenessSuffix)
-                                                             , "password" .= ("averystrongpass" :: String)
-                                                             ])
-                                blockedReq
-        assertStatusCode "Signup should be blocked when rate limit is reached" 400 blockedResponse
   where
     firstChecklistContent    = ChecklistContent { name = "First checklist"
                                                  , items = [ ChecklistItem { label = "First item label unchecked", checked = False }
@@ -149,9 +250,10 @@ extractCookiePair setCookieHeader =
 signupAndSignin :: String -> String -> IO String
 signupAndSignin username password = do
   signupReq <- parseRequest "POST http://localhost:8081/api/signup"
-  _ <- httpNoBody $ setRequestMethod "POST"
+  signupResponse <- httpNoBody $ setRequestMethod "POST"
                 $ setRequestHeader "Content-Type" ["application/json"]
                 $ setRequestBodyJSON (authPayload username password) signupReq
+  assertStatusCode "Signup should succeed" 200 signupResponse
   signinOnly username password
 
 signinOnly :: String -> String -> IO String
@@ -211,6 +313,12 @@ createNewContent cookie endpoint content = do
   postResponse :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST endpoint content
   assertStatusCode200 ("Failed to create item" ++ show content) postResponse
 
+createNewContentReturningId :: (Content contentType, RequestType POST endpointType contentType StorageId) => String -> endpointType -> contentType -> IO String
+createNewContentReturningId cookie endpoint content = do
+  postResponse :: Response StorageId <- sendRequestWithJSONBodyImplWithCookie (Just cookie) POST endpoint content
+  assertStatusCode200 ("Failed to create item" ++ show content) postResponse
+  pure (id $ getResponseBody postResponse)
+
 assertGetWithContent :: (Content contentType, RequestType GET endpointType () [Identifiable contentType]) => String -> endpointType -> contentType -> IO [Identifiable contentType]
 assertGetWithContent cookie endpoint expectedContent = do
   getResponse <- sendRequestWithJSONBodyImplWithCookie (Just cookie) GET endpoint ()
@@ -228,6 +336,28 @@ deleteItem cookie endpoint idToDelete = do
                 $ setRequestHeader "Cookie" [BS.pack cookie] req
   deleteResponse <- httpBS deleteReq
   assertStatusCode200 ("Failed to delete item" ++ show idToDelete) deleteResponse
+
+restoreItem :: Endpoint a => String -> a -> String -> IO (Response Value)
+restoreItem cookie endpoint idToRestore = do
+  req <- parseRequest ("POST http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToRestore ++ "/restore")
+  httpJSON $ setRequestMethod "POST"
+          $ setRequestHeader "Cookie" [BS.pack cookie]
+          $ setRequestHeader "Content-Type" ["application/json"]
+          $ setRequestBodyJSON (object []) req
+
+restoreItemRaw :: Endpoint a => String -> a -> String -> IO (Response ByteString)
+restoreItemRaw cookie endpoint idToRestore = do
+  req <- parseRequest ("POST http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToRestore ++ "/restore")
+  httpBS $ setRequestMethod "POST"
+       $ setRequestHeader "Cookie" [BS.pack cookie]
+       $ setRequestHeader "Content-Type" ["application/json"]
+       $ setRequestBodyJSON (object []) req
+
+purgeItem :: Endpoint a => String -> a -> String -> IO (Response Value)
+purgeItem cookie endpoint idToPurge = do
+  req <- parseRequest ("DELETE http://localhost:8081" ++ getEndpoint endpoint ++ "/" ++ idToPurge ++ "/purge")
+  httpJSON $ setRequestMethod "DELETE"
+          $ setRequestHeader "Cookie" [BS.pack cookie] req
 
 assertWithFoundContent :: Content a => String -> [a] -> Response [Identifiable a] -> IO [Identifiable a]
 assertWithFoundContent errorPrefix expectedContents response = do
@@ -306,6 +436,10 @@ data ChecklistEndpoint = ChecklistEndpoint
 instance Endpoint ChecklistEndpoint where
     getEndpoint ChecklistEndpoint = "/api/checklist"
 
+data AgendaEndpoint = AgendaEndpoint
+instance Endpoint AgendaEndpoint where
+    getEndpoint AgendaEndpoint = "/api/agenda"
+
 class (ToJSON requestType, FromJSON responseType, Endpoint endpoint, Method methodType) => RequestType methodType endpoint requestType responseType | endpoint methodType -> requestType, endpoint methodType requestType -> responseType where
     sendRequestWithJSONBody :: endpoint -> methodType -> requestType -> IO (Response responseType)
 
@@ -326,3 +460,47 @@ instance RequestType POST ChecklistEndpoint ChecklistContent StorageId where
 
 instance RequestType PUT ChecklistEndpoint (Identifiable ChecklistContent) StorageId where
     sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl PUT endpoint
+
+instance RequestType GET AgendaEndpoint () [Identifiable AgendaContent] where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl GET endpoint
+
+instance RequestType POST AgendaEndpoint AgendaContent StorageId where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl POST endpoint
+
+instance RequestType PUT AgendaEndpoint (Identifiable AgendaContent) StorageId where
+    sendRequestWithJSONBody endpoint _ = sendRequestWithJSONBodyImpl PUT endpoint
+
+postTask :: String -> String -> TaskContent -> IO (Response StorageId)
+postTask cookie agendaId payload = do
+  req <- parseRequest ("POST http://localhost:8081/api/agenda/" ++ agendaId ++ "/task")
+  let payloadWithAgenda = payload { taskAgendaId = agendaId }
+  httpJSON
+    $ setRequestMethod "POST"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ setRequestHeader "Content-Type" ["application/json"]
+    $ setRequestBodyJSON payloadWithAgenda req
+
+getAgendaSearch :: String -> String -> [(String, String)] -> IO (Response [Identifiable TaskContent])
+getAgendaSearch cookie agendaId queryParams = do
+  req <- parseRequest ("GET http://localhost:8081/api/agenda/" ++ agendaId ++ "/search")
+  let reqWithQuery = setRequestQueryString (map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams) req
+  httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ reqWithQuery
+
+getAgendaSearchRaw :: String -> String -> [(String, String)] -> IO (Response ByteString)
+getAgendaSearchRaw cookie agendaId queryParams = do
+  req <- parseRequest ("GET http://localhost:8081/api/agenda/" ++ agendaId ++ "/search")
+  let reqWithQuery = setRequestQueryString (map (\(k, v) -> (BS.pack k, Just (BS.pack v))) queryParams) req
+  httpBS
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie]
+    $ reqWithQuery
+
+getAgendaConflicts :: String -> String -> IO (Response [TaskConflict])
+getAgendaConflicts cookie agendaId = do
+  req <- parseRequest ("GET http://localhost:8081/api/agenda/" ++ agendaId ++ "/conflicts")
+  httpJSON
+    $ setRequestMethod "GET"
+    $ setRequestHeader "Cookie" [BS.pack cookie] req

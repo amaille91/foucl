@@ -7,7 +7,7 @@ module Lib
     ( runApp
     ) where
 
-import Prelude hiding (log, writeFile)
+import Prelude hiding (log, writeFile, id)
 import Data.Aeson (ToJSON(toJSON), FromJSON(parseJSON), decode, encode, decode', eitherDecodeFileStrict', (.:), (.:?), (.=), withObject, object)
 import Data.Function ((&))
 import Data.Functor ((<$>))
@@ -21,26 +21,27 @@ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Data.Either (either)
 import qualified Data.ByteString.Char8 as BS8
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isInfixOf, tails)
 import Data.Char (toLower)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Happstack.Server (FilterMonad, Response, ServerPartT, RqBody, takeRequestBody, unBody, rqBody, decodeBody, askRq, defaultBodyPolicy, nullDir, path, serveFileFrom, guessContentTypeM, mimeTypes, uriRest, nullConf, simpleHTTP, toResponse, method, ok, internalServerError, notFound, dir, Method(GET, POST, DELETE, PUT), Conf(..), addCookie, mkCookie, CookieLife(Session, Expired), getHeaderM)
 import qualified Happstack.Server as HServer
 import qualified Happstack.Server.Internal.Cookie as HCookie
 import Happstack.Server.Internal.MessageWrap (bodyInput, BodyPolicy)
-import Model (NoteContent, ChecklistContent, Content, Identifiable(..))
+import Model (NoteContent, ChecklistContent, AgendaContent, TaskContent(..), TaskConflict(..), Content, Identifiable(..), StorageId(..), hash)
 import qualified CrudStorage
 import Crud
 import NoteCrud (NoteServiceConfig(..), defaultNoteServiceConfig)
 import ChecklistCrud (ChecklistServiceConfig(..), defaultChecklistServiceConfig)
+import AgendaCrud (AgendaServiceConfig(..))
+import TaskCrud (TaskServiceConfig(..))
+import Logging (log)
 import System.Directory (doesFileExist, getCurrentDirectory, canonicalizePath, getTemporaryDirectory)
 import System.FilePath ((</>), pathSeparator)
-import System.IO (hFlush, stdout)
 import System.Environment (lookupEnv)
 import System.Exit (exitFailure)
 import Data.Time.Clock (UTCTime, getCurrentTime, addUTCTime)
 import GHC.Generics (Generic)
-import Data.ByteString.Lazy.Char8 (writeFile)
 import Filesystem.Path.CurrentOS    (commonPrefix, encodeString, decodeString, collapse, append)
 import qualified Auth (AuthRequest(..), AuthRequestError(..), AuthError(..), createUser, signinUser)
 import qualified Session
@@ -155,6 +156,7 @@ apiController signupRateLimitState tmpDir sessionConfig sessionStore = dir "api"
                                                                                           , signoutController sessionConfig sessionStore
                                                                                           , requireAuth sessionConfig sessionStore noteController
                                                                                           , requireAuth sessionConfig sessionStore checklistController
+                                                                                          , requireAuth sessionConfig sessionStore agendaController
                                                                                           ]
 
 homePage :: ServerPartT IO Response
@@ -334,20 +336,157 @@ requireAuth sessionConfig sessionStore handler = do
 
 
 noteController :: AppContext -> ServerPartT IO Response
-noteController _ = dir "note" noteHandlers
+noteController appContext = dir "note" noteHandlers
     where
-        noteHandlers = msum $ defaultNoteServiceConfig <%> [ crudGet
-                                                           , crudPost
-                                                           , crudDelete
-                                                           , crudPut
-                                                           ]
+        noteHandlers = msum $ noteServiceConfigFor appContext <%> [ crudGet
+                                                                  , crudPost
+                                                                  , crudDelete
+                                                                  , crudRestore
+                                                                  , crudPurge
+                                                                  , crudPut
+                                                                  ]
 checklistController :: AppContext -> ServerPartT IO Response
-checklistController _ = dir "checklist" $
-  msum $ defaultChecklistServiceConfig <%> [ crudGet
-                                           , crudPost
-                                           , crudDelete
-                                           , crudPut
-                                           ]
+checklistController appContext = dir "checklist" $
+  msum $ checklistServiceConfigFor appContext <%> [ crudGet
+                                                  , crudPost
+                                                  , crudDelete
+                                                  , crudRestore
+                                                  , crudPurge
+                                                  , crudPut
+                                                  ]
+
+agendaController :: AppContext -> ServerPartT IO Response
+agendaController appContext = dir "agenda" $ msum
+  [ msum $ agendaServiceConfigFor appContext <%> [ crudGet
+                                                 , crudPost
+                                                 , crudDelete
+                                                 , crudRestore
+                                                 , crudPurge
+                                                 , crudPut
+                                                 ]
+  , path $ \agendaId -> msum
+      [ dir "task" $ msum
+          [ nullDir >> method GET >> getTasksForAgendaHandler appContext agendaId
+          , nullDir >> method POST >> createTaskForAgendaHandler appContext agendaId
+          ]
+      , dir "search" $ nullDir >> method GET >> searchTasksForAgendaHandler appContext agendaId
+      , dir "conflicts" $ nullDir >> method GET >> conflictsForAgendaHandler appContext agendaId
+      ]
+  ]
+
+noteServiceConfigFor :: AppContext -> NoteServiceConfig
+noteServiceConfigFor AppContext {sessionPrincipal} =
+  NoteServiceConfig ("data/users/" ++ Session.principalUserId sessionPrincipal ++ "/note")
+
+checklistServiceConfigFor :: AppContext -> ChecklistServiceConfig
+checklistServiceConfigFor AppContext {sessionPrincipal} =
+  ChecklistServiceConfig ("data/users/" ++ Session.principalUserId sessionPrincipal ++ "/checklist")
+
+agendaServiceConfigFor :: AppContext -> AgendaServiceConfig
+agendaServiceConfigFor AppContext {sessionPrincipal} =
+  AgendaServiceConfig ("data/users/" ++ Session.principalUserId sessionPrincipal ++ "/agenda")
+
+taskServiceConfigFor :: AppContext -> TaskServiceConfig
+taskServiceConfigFor AppContext {sessionPrincipal} =
+  TaskServiceConfig ("data/users/" ++ Session.principalUserId sessionPrincipal ++ "/task")
+
+getTasksForAgendaHandler :: AppContext -> String -> ServerPartT IO Response
+getTasksForAgendaHandler appContext agendaId = do
+  tasks <- liftIO $ listTasksForAgenda appContext agendaId
+  ok $ jsonResponse tasks
+
+createTaskForAgendaHandler :: AppContext -> String -> ServerPartT IO Response
+createTaskForAgendaHandler appContext agendaId = do
+  agendaExists <- liftIO $ doesAgendaExist appContext agendaId
+  if not agendaExists
+    then notFound emptyResponse
+    else do
+      body <- askRq >>= takeRequestBody
+      case body >>= (decode . unBody) of
+        Nothing -> badRequest "Unable to parse task payload"
+        Just incomingTask -> do
+          let taskContent = incomingTask { taskAgendaId = agendaId, taskDeletedAt = Nothing }
+          recover (logThenGenericInternalError (taskServiceConfigFor appContext)) (ok . jsonResponse) $
+            CrudStorage.createItem (taskServiceConfigFor appContext) taskContent
+
+searchTasksForAgendaHandler :: AppContext -> String -> ServerPartT IO Response
+searchTasksForAgendaHandler appContext agendaId = do
+  agendaExists <- liftIO $ doesAgendaExist appContext agendaId
+  if not agendaExists
+    then notFound emptyResponse
+    else do
+      mTag <- optionalQueryParam "tag"
+      mStatus <- optionalQueryParam "status"
+      mQ <- optionalQueryParam "q"
+      mFrom <- optionalQueryParam "from"
+      mTo <- optionalQueryParam "to"
+      allTasks <- liftIO $ listTasksForAgenda appContext agendaId
+      let tasks = filter (matchesTaskSearch mTag mStatus mQ mFrom mTo . content) allTasks
+      ok $ jsonResponse tasks
+
+conflictsForAgendaHandler :: AppContext -> String -> ServerPartT IO Response
+conflictsForAgendaHandler appContext agendaId = do
+  agendaExists <- liftIO $ doesAgendaExist appContext agendaId
+  if not agendaExists
+    then notFound emptyResponse
+    else do
+      tasks <- liftIO $ listTasksForAgenda appContext agendaId
+      let conflicts = findTaskConflicts tasks
+      ok $ jsonResponse conflicts
+
+optionalQueryParam :: String -> ServerPartT IO (Maybe String)
+optionalQueryParam name = (Just <$> HServer.look name) `mplus` pure Nothing
+
+listTasksForAgenda :: AppContext -> String -> IO [Identifiable TaskContent]
+listTasksForAgenda appContext agendaId = do
+  allTasks <- readAllCrudItems (taskServiceConfigFor appContext)
+  pure $ filter (\item -> taskAgendaId (content item) == agendaId && taskDeletedAt (content item) == Nothing) allTasks
+
+doesAgendaExist :: AppContext -> String -> IO Bool
+doesAgendaExist appContext agendaId = do
+  let config = agendaServiceConfigFor appContext
+      agendaPath = rootPath config ++ "/" ++ agendaId ++ ".txt"
+  doesFileExist agendaPath
+
+readAllCrudItems :: CRUDEngine crudType a => crudType -> IO [Identifiable a]
+readAllCrudItems config = do
+  result <- runExceptT $ getItems config
+  case result of
+    Left _ -> pure []
+    Right parsed -> handlePotentialParsingErrors parsed
+
+matchesTaskSearch :: Maybe String -> Maybe String -> Maybe String -> Maybe String -> Maybe String -> TaskContent -> Bool
+matchesTaskSearch mTag mStatus mQ mFrom mTo task =
+  and [ maybe True (\tagFilter -> tagFilter `elem` taskTags task) mTag
+      , maybe True (\statusFilter -> map toLower statusFilter == map toLower (taskStatus task)) mStatus
+      , maybe True (\query -> containsIgnoreCase query (taskTitle task) || maybe False (containsIgnoreCase query) (taskDescription task)) mQ
+      , maybe True (\fromDate -> taskScheduledStartUtc task >= fromDate) mFrom
+      , maybe True (\toDate -> taskScheduledEndUtc task <= toDate) mTo
+      ]
+
+containsIgnoreCase :: String -> String -> Bool
+containsIgnoreCase needle haystack =
+  let loweredNeedle = map toLower needle
+      loweredHaystack = map toLower haystack
+  in loweredNeedle `isInfixOf` loweredHaystack
+
+findTaskConflicts :: [Identifiable TaskContent] -> [TaskConflict]
+findTaskConflicts items = concatMap conflictsFromHead (tails items)
+  where
+    conflictsFromHead [] = []
+    conflictsFromHead (x:xs) = mapMaybeConflict x xs
+
+    mapMaybeConflict _ [] = []
+    mapMaybeConflict leftItem (rightItem:rest) =
+      let next = mapMaybeConflict leftItem rest
+      in if overlaps (content leftItem) (content rightItem)
+           then TaskConflict { leftTaskId = id (storageId leftItem), rightTaskId = id (storageId rightItem) } : next
+           else next
+
+overlaps :: TaskContent -> TaskContent -> Bool
+overlaps left right =
+  taskScheduledStartUtc left < taskScheduledEndUtc right
+  && taskScheduledStartUtc right < taskScheduledEndUtc left
 
 crudGet ::CRUDEngine crudType a => crudType -> ServerPartT IO Response
 crudGet crudConfig = do
@@ -406,6 +545,22 @@ crudDelete crudConfig = do
         nullDir
         recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ CrudStorage.deleteItem crudConfig pathId)
 
+crudRestore :: DiskFileStorageConfig crudType => crudType -> ServerPartT IO Response
+crudRestore crudConfig = do
+    method POST
+    log ("crud RESTORE on " ++ rootPath crudConfig)
+    path (\pathId -> dir "restore" $ do
+        nullDir
+        recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ CrudStorage.restoreItem crudConfig pathId)
+
+crudPurge :: DiskFileStorageConfig crudType => crudType -> ServerPartT IO Response
+crudPurge crudConfig = do
+    method DELETE
+    log ("crud PURGE on " ++ rootPath crudConfig)
+    path (\pathId -> dir "purge" $ do
+        nullDir
+        recover (handleDeletionError pathId) (\() -> ok emptyResponse) $ CrudStorage.purgeItem crudConfig pathId)
+
 handleDeletionError :: String -> CrudWriteException -> ServerPartT IO Response
 handleDeletionError pathId err = do
     logDeletionError pathId err
@@ -450,7 +605,7 @@ orElse :: Maybe a -> a -> a
 _        `orElse` b = b
 
 recoverIO :: (MonadIO m, Monad m) => ExceptT e IO (m a) -> (e -> m a) -> m a
-recoverIO exceptT f = join $ liftIO $ fmap (either f id) (runExceptT exceptT)
+recoverIO exceptT f = join $ liftIO $ fmap (either f (\x -> x)) (runExceptT exceptT)
 
 recoverWith :: (MonadIO m, Monad m) => (e -> m a) -> ExceptT e IO (m a) -> m a
 recoverWith = flip recoverIO
@@ -475,10 +630,6 @@ genericInternalError s = do
 
 emptyInternalError :: ServerPartT IO Response
 emptyInternalError = internalServerError emptyResponse
-
-log :: (Show s, MonadIO m) => s -> m ()
-log s = do
-  liftIO $ print s >> hFlush stdout
 
 infixr 4 <%>
 

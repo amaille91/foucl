@@ -8,7 +8,7 @@ import Test.HUnit.Lang
 import Test.HUnit.Base(Counts(..), (@?), (~:), test, assertBool, assertFailure)
 import Test.HUnit.Text (runTestTT)
 import Crud (CRUDEngine(..), DiskFileStorageConfig(..), Error(..), CrudModificationException(..), CrudReadException(..), CrudWriteException(..))
-import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..)) 
+import Model (Identifiable(..), NoteContent(..), ChecklistContent(..), ChecklistItem(..), StorageId(..), AgendaContent(..), TaskContent(..), TaskReminder(..), RecurrenceRule(..)) 
 import System.Directory (removeDirectoryRecursive, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, getCurrentDirectory, getPermissions, Permissions(..))
 import Data.Maybe (fromJust)
 import Data.Either (isRight)
@@ -21,14 +21,17 @@ import Control.Concurrent (threadDelay)
 import System.Exit (exitSuccess, exitFailure)
 import NoteCrud (NoteServiceConfig(..))
 import ChecklistCrud (ChecklistServiceConfig(..))
+import AgendaCrud (AgendaServiceConfig(..))
+import TaskCrud (TaskServiceConfig(..))
 import qualified Auth
 import qualified Session
 import qualified Data.Text as Text
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.ByteString.Lazy.Char8 as BL8
+import qualified CrudStorage
 
 runUnitTests :: IO ()
-runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, signupValidationTests, signinValidationTests, sessionTests]
+runUnitTests = runTestTTAndExit $ test [noteServiceTests, checklistServiceTests, agendaServiceTests, taskServiceTests, signupValidationTests, signinValidationTests, sessionTests]
 
 runTestTTAndExit tests = do
   c <- runTestTT tests
@@ -44,6 +47,8 @@ noteServiceTests = test [ "Creating a note should create a new file in storage d
                         , "Modifying an existing note should give back the modified note" ~: withEmptyDir noteServiceConfig modifyAnExistingNote
                         , "Modifying an non-existing note should give back a NotFoundError" ~: withEmptyDir noteServiceConfig modifyANonExistingNote
                         , "Modifying an existing note but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir noteServiceConfig modifyWrongCurrentVersion
+                        , "Deleted note should be restorable from trash" ~: withEmptyDir noteServiceConfig restoreDeletedItemTest
+                        , "Purged note should not be restorable" ~: withEmptyDir noteServiceConfig purgeDeletedItemTest
                         ]
 
 checklistServiceTests = test [ "Creating a checklist should create a new file in storage directory" ~: withEmptyDir checklistServiceConfig createTest
@@ -55,6 +60,20 @@ checklistServiceTests = test [ "Creating a checklist should create a new file in
                              , "Modifying an non-existing checklist should give back a NotFoundError" ~: withEmptyDir checklistServiceConfig modifyANonExistingNote
                              , "Modifying an existing checklist but with wrong current version should give back a NotCurrentVersion error" ~: withEmptyDir checklistServiceConfig modifyWrongCurrentVersion
                              ]
+
+agendaServiceTests = test [ "Creating an agenda should create a new file in storage directory" ~: withEmptyDir agendaServiceConfig createTest
+                          , "Getting all agendas on an empty storage directory should give an empty list" ~: getEmptyDirTest agendaServiceConfig
+                          , "Creating then getting all agendas should give back the agenda" ~: withEmptyDir agendaServiceConfig createManyThenGetTest
+                          , "Creating then deleting all agendas should give back no agenda" ~: withEmptyDir agendaServiceConfig createManyThenDeleteAllTest
+                          , "Modifying an existing agenda should give back the modified agenda" ~: withEmptyDir agendaServiceConfig modifyAnExistingNote
+                          ]
+
+taskServiceTests = test [ "Creating a task should create a new file in storage directory" ~: withEmptyDir taskServiceConfig createTest
+                        , "Getting all tasks on an empty storage directory should give an empty list" ~: getEmptyDirTest taskServiceConfig
+                        , "Creating then getting all tasks should give back the task" ~: withEmptyDir taskServiceConfig createManyThenGetTest
+                        , "Creating then deleting all tasks should give back no task" ~: withEmptyDir taskServiceConfig createManyThenDeleteAllTest
+                        , "Modifying an existing task should give back the modified task" ~: withEmptyDir taskServiceConfig modifyAnExistingNote
+                        ]
 
 createTest :: ContentGen crudConfig a => crudConfig -> IO ()
 createTest config = do
@@ -127,6 +146,25 @@ modifyWrongCurrentVersion config = do
         wrongVersionItemUpdate creationStorageId =
             Identifiable (wrongVersionStorageId creationStorageId) (generateExample config 20)
 
+restoreDeletedItemTest :: ContentGen crudConfig a => crudConfig -> IO ()
+restoreDeletedItemTest config = do
+    Right creationId <- runExceptT $ postItem config (generateExample config 1)
+    Right () <- runExceptT $ delItem config (id creationId)
+    Right () <- runExceptT $ CrudStorage.restoreItem config (id creationId)
+    Right potentialItems <- runExceptT $ getItems config
+    items <- mapM (fmap fromRight . runExceptT) potentialItems
+    assertEqual "Restored item should be visible again in active storage" 1 (length items)
+
+purgeDeletedItemTest :: ContentGen crudConfig a => crudConfig -> IO ()
+purgeDeletedItemTest config = do
+    Right creationId <- runExceptT $ postItem config (generateExample config 1)
+    Right () <- runExceptT $ delItem config (id creationId)
+    Right () <- runExceptT $ CrudStorage.purgeItem config (id creationId)
+    Left _ <- runExceptT $ CrudStorage.restoreItem config (id creationId)
+    Right potentialItems <- runExceptT $ getItems config
+    items <- mapM (fmap fromRight . runExceptT) potentialItems
+    assertEqual "Purged item should stay absent from active storage" [] items
+
 assertEqualWithoutOrder :: (Show a, Eq a) => String -> [a] -> [a] -> IO ()
 assertEqualWithoutOrder s as bs = do
     assertBool (s ++ "\n\t" ++ show as ++ " should be equal in " ++ show bs) (null (as \\ bs))
@@ -145,6 +183,12 @@ retrieveContentInDir config = do
 
 checklistServiceConfig :: ChecklistServiceConfig
 checklistServiceConfig = ChecklistServiceConfig "target/.foucl/data/checklist/"
+
+agendaServiceConfig :: AgendaServiceConfig
+agendaServiceConfig = AgendaServiceConfig "target/.foucl/data/agenda/"
+
+taskServiceConfig :: TaskServiceConfig
+taskServiceConfig = TaskServiceConfig "target/.foucl/data/task/"
 
 noteServiceConfig :: NoteServiceConfig
 noteServiceConfig = NoteServiceConfig "target/.foucl/data/note/"
@@ -171,6 +215,33 @@ instance ContentGen NoteServiceConfig NoteContent where
 
 instance ContentGen ChecklistServiceConfig ChecklistContent where
     generateExample _ i = ChecklistContent { name = "ExampleNoteTitle " ++ show i, items = [ ChecklistItem { label = "Checklist label " ++ show i ++ "-" ++ show k, checked = even k } | k <- [1..5] ] }
+
+instance ContentGen AgendaServiceConfig AgendaContent where
+    generateExample _ i = AgendaContent { agendaName = "Agenda " ++ show i
+                                        , agendaDescription = Just ("Agenda description " ++ show i)
+                                        , agendaTimezone = "UTC"
+                                        }
+
+instance ContentGen TaskServiceConfig TaskContent where
+    generateExample _ i = TaskContent { taskAgendaId = "agenda-" ++ show i
+                                      , taskTitle = "Task " ++ show i
+                                      , taskDescription = Just ("Task description " ++ show i)
+                                      , taskStatus = "todo"
+                                      , taskScheduledStartUtc = "2026-03-01T09:00:00Z"
+                                      , taskScheduledEndUtc = "2026-03-01T12:00:00Z"
+                                      , taskTimezone = "UTC"
+                                      , taskEstimatedDurationMinutes = Just 45
+                                      , taskTags = ["pro", "test-" ++ show i]
+                                      , taskRecurrence = Just RecurrenceRule { frequency = "weekly"
+                                                                             , interval = 1
+                                                                             , untilUtc = Nothing
+                                                                             , count = Nothing
+                                                                             , byWeekday = Just ["MO"]
+                                                                             , byMonthday = Nothing
+                                                                         }
+                                      , taskReminders = [TaskReminder { offsetMinutesBefore = 30 }]
+                                      , taskDeletedAt = Nothing
+                                      }
 
 signupValidationTests = test [ "Signup should reject short passwords" ~: rejectShortPassword
                              , "Signup should reject invalid usernames" ~: rejectInvalidUsername

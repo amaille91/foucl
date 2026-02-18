@@ -5,6 +5,9 @@
 module Model (
   NoteContent(..), StorageId(..)
   , ChecklistContent(..), ChecklistItem(..)
+  , AgendaContent(..)
+  , TaskContent(..), RecurrenceRule(..), TaskReminder(..)
+  , TaskConflict(..)
   , Content
   , Identifiable(..), hash
   , mkIdentifiable
@@ -77,6 +80,121 @@ instance ToJSON   ChecklistItem
 
 instance Content ChecklistContent where
   hash checklistContent = base64Sha256 $ show checklistContent
+
+-- ======================= AGENDA ==========================================
+
+data AgendaContent = AgendaContent
+  { agendaName :: String
+  , agendaDescription :: Maybe String
+  , agendaTimezone :: String
+  } deriving (Show, Generic, Eq)
+
+instance FromJSON AgendaContent where
+  parseJSON = withObject "AgendaContent" $ \v -> AgendaContent
+    <$> v .: "name"
+    <*> v .:? "description"
+    <*> v .: "timezone"
+
+instance ToJSON AgendaContent where
+  toJSON AgendaContent { agendaName = agendaName', agendaDescription = agendaDescription', agendaTimezone = agendaTimezone' } =
+    object [ "name" .= agendaName'
+           , "description" .= agendaDescription'
+           , "timezone" .= agendaTimezone'
+           ]
+
+instance Content AgendaContent where
+  hash agendaContent = base64Sha256 $ show agendaContent
+
+-- ======================= TASK ============================================
+
+data RecurrenceRule = RecurrenceRule
+  { frequency :: String
+  , interval :: Int
+  , untilUtc :: Maybe String
+  , count :: Maybe Int
+  , byWeekday :: Maybe [String]
+  , byMonthday :: Maybe [Int]
+  } deriving (Show, Generic, Eq)
+
+instance FromJSON RecurrenceRule
+instance ToJSON RecurrenceRule
+
+data TaskReminder = TaskReminder
+  { offsetMinutesBefore :: Int
+  } deriving (Show, Generic, Eq)
+
+instance FromJSON TaskReminder
+instance ToJSON TaskReminder
+
+data TaskContent = TaskContent
+  { taskAgendaId :: String
+  , taskTitle :: String
+  , taskDescription :: Maybe String
+  , taskStatus :: String
+  , taskScheduledStartUtc :: String
+  , taskScheduledEndUtc :: String
+  , taskTimezone :: String
+  , taskEstimatedDurationMinutes :: Maybe Int
+  , taskTags :: [String]
+  , taskRecurrence :: Maybe RecurrenceRule
+  , taskReminders :: [TaskReminder]
+  , taskDeletedAt :: Maybe String
+  } deriving (Show, Generic, Eq)
+
+instance FromJSON TaskContent where
+  parseJSON = withObject "TaskContent" $ \v -> TaskContent
+    <$> v .: "agendaId"
+    <*> v .: "title"
+    <*> v .:? "description"
+    <*> v .: "status"
+    <*> v .: "scheduledStartUtc"
+    <*> v .: "scheduledEndUtc"
+    <*> v .: "timezone"
+    <*> v .:? "estimatedDurationMinutes"
+    <*> v .:? "tags" .!= []
+    <*> v .:? "recurrence"
+    <*> v .:? "reminders" .!= []
+    <*> v .:? "deletedAt"
+
+instance ToJSON TaskContent where
+  toJSON TaskContent
+      { taskAgendaId = taskAgendaId'
+      , taskTitle = taskTitle'
+      , taskDescription = taskDescription'
+      , taskStatus = taskStatus'
+      , taskScheduledStartUtc = taskScheduledStartUtc'
+      , taskScheduledEndUtc = taskScheduledEndUtc'
+      , taskTimezone = taskTimezone'
+      , taskEstimatedDurationMinutes = taskEstimatedDurationMinutes'
+      , taskTags = taskTags'
+      , taskRecurrence = taskRecurrence'
+      , taskReminders = taskReminders'
+      , taskDeletedAt = taskDeletedAt'
+      } =
+    object [ "agendaId" .= taskAgendaId'
+           , "title" .= taskTitle'
+           , "description" .= taskDescription'
+           , "status" .= taskStatus'
+           , "scheduledStartUtc" .= taskScheduledStartUtc'
+           , "scheduledEndUtc" .= taskScheduledEndUtc'
+           , "timezone" .= taskTimezone'
+           , "estimatedDurationMinutes" .= taskEstimatedDurationMinutes'
+           , "tags" .= taskTags'
+           , "recurrence" .= taskRecurrence'
+           , "reminders" .= taskReminders'
+           , "deletedAt" .= taskDeletedAt'
+           ]
+
+instance Content TaskContent where
+  hash taskContent = base64Sha256 $ show taskContent
+
+data TaskConflict = TaskConflict
+  { leftTaskId :: String
+  , rightTaskId :: String
+  } deriving (Show, Generic, Eq)
+
+instance FromJSON TaskConflict
+instance ToJSON TaskConflict
 
 -- =============================== Utils ==========================================
 

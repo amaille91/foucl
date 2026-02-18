@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module CrudStorage (createItem, getAllItems, deleteItem, modifyItem) where
+module CrudStorage (createItem, getAllItems, deleteItem, restoreItem, purgeItem, modifyItem) where
 
 import           Control.Exception          (catch)
 import           Control.Monad              (mzero)
@@ -19,7 +19,7 @@ import           Crud                       (CRUDEngine (..),
                                              FromCrudWriteException (..))
 import           Data.Aeson                 (FromJSON, ToJSON, eitherDecode,
                                              encode)
-import           Data.ByteString.Lazy.Char8 as BL hiding (appendFile, filter,
+import           Data.ByteString.Lazy.Char8 as BL hiding (filter,
                                                    map, putStrLn)
 import           Data.Maybe                 (fromJust)
 import qualified Data.UUID                  as UUID (toString)
@@ -28,12 +28,16 @@ import           Model                      (ChecklistContent (..), Content,
                                              Identifiable (..),
                                              NoteContent (..), StorageId (..),
                                              hash)
+import           Logging                    (log)
 import qualified Prelude                    (id)
 import           Prelude                    hiding (id, log, readFile,
                                              writeFile)
 import           System.Directory           (createDirectoryIfMissing,
                                              listDirectory, removePathForcibly,
-                                             doesFileExist)
+                                             doesFileExist, renameFile)
+import           System.FilePath            (takeDirectory, takeFileName,
+                                             dropTrailingPathSeparator, (</>))
+import qualified Data.List                  as List
 
 -- DATA
 type Id = String
@@ -58,7 +62,34 @@ getAllItems config = do
     return $ fmap (readItemFromFile config) simpleFileNames
 
 deleteItem :: DiskFileStorageConfig confType => confType -> String -> EitherT CrudWriteException IO ()
-deleteItem config id = handleEitherT IOWriteException (removePathForcibly $ fileName config id)
+deleteItem config itemId = do
+    let sourceFile = fileName config itemId
+        targetFile = trashFileName config itemId
+    sourceExists <- liftIO $ doesFileExist sourceFile
+    if sourceExists
+      then do
+        handleEitherT IOWriteException $ createDirectoryIfMissing True (takeDirectory targetFile)
+        handleEitherT IOWriteException $ renameFile sourceFile targetFile
+      else pure ()
+
+restoreItem :: DiskFileStorageConfig confType => confType -> String -> EitherT CrudWriteException IO ()
+restoreItem config itemId = do
+    let sourceFile = trashFileName config itemId
+        targetFile = fileName config itemId
+    sourceExists <- liftIO $ doesFileExist sourceFile
+    if sourceExists
+      then do
+        handleEitherT IOWriteException $ createDirectoryIfMissing True (takeDirectory targetFile)
+        handleEitherT IOWriteException $ renameFile sourceFile targetFile
+      else handleEitherT IOWriteException (ioError (userError "Item not found in trash"))
+
+purgeItem :: DiskFileStorageConfig confType => confType -> String -> EitherT CrudWriteException IO ()
+purgeItem config itemId = do
+    let sourceFile = trashFileName config itemId
+    sourceExists <- liftIO $ doesFileExist sourceFile
+    if sourceExists
+      then handleEitherT IOWriteException (removePathForcibly sourceFile)
+      else pure ()
 
 modifyItem :: CRUDEngine crudConfig a => crudConfig -> Identifiable a -> EitherT CrudModificationException IO StorageId
 modifyItem config (Identifiable targetStorageId new) = do
@@ -95,7 +126,7 @@ parsingExceptionToCrudException file (ParsingException parsedString errorMessage
 
 listFiles :: DiskFileStorageConfig crudConfig => crudConfig -> EitherT IOError IO [String]
 listFiles config = handleEitherT ioError
-                                 (listDirectory (rootPath config))
+                                 (fmap (filter (List.isSuffixOf txtExtension)) (listDirectory (rootPath config)))
   where ioError :: IOError -> IOError
         ioError = Prelude.id
 
@@ -127,6 +158,12 @@ prefixWithStorageDir storageConfig s = postFixWithIfNeeded '/' (rootPath storage
         postFixWithIfNeeded c [x] = if c == x then [c] else [x, c]
         postFixWithIfNeeded c (x:xs) = x:postFixWithIfNeeded c xs
 
-log :: MonadIO m => String -> m ()
-log s = liftIO $ appendFile  "./server.log" $ s ++ "\n"
+trashFileName :: DiskFileStorageConfig crudConfig => crudConfig -> Id -> FilePath
+trashFileName storageConfig itemId = trashRootPath storageConfig </> itemId ++ txtExtension
 
+trashRootPath :: DiskFileStorageConfig crudConfig => crudConfig -> FilePath
+trashRootPath storageConfig =
+  let root = dropTrailingPathSeparator (rootPath storageConfig)
+      parent = takeDirectory root
+      resourceType = takeFileName root
+  in parent </> ".trash" </> resourceType
